@@ -6,8 +6,8 @@ from sgan.data.loader import data_loader
 import os
 import torch
 
-model_name = "eth_8_model"
-model_path = "models/sgan-p-models/%s.pt" % model_name
+model_name = "zara2_8_model"
+model_path = "models/sgan-models/%s.pt" % model_name
 trajPlan = SGANInference(model_path)
 generator = trajPlan.generator
 _args = trajPlan.args
@@ -21,13 +21,15 @@ checkpoint = {
     'future_mask': [],
     'model_matrix': [],
     'mse_metric': [],
-    'interaction_time':[]
+    'interaction_time':[],
+    'delta':[],
+    'predictions':[]
 }
 checkpoint_path = os.path.join(
-    os.getcwd(), 'checkpoints', '%s_baseline_time_p.pt' % model_name
+    os.getcwd(), 'checkpoints', '%s_baseline_new.pt' % model_name
                 )
 print_every = 20
-i = 0
+iter = 0
 
 for batch in loader:
     obs_traj, obs_traj_rel, ground_truth_list, mask_list, render_list, seq_start_end = batch
@@ -40,28 +42,35 @@ for batch in loader:
     obs_traj = obs_traj.numpy()
     traj_length = len(obs_traj[1])
     matrices = []
-    times = []
     predicted = obs_traj.transpose((1,0,2))
+    predictions = []
     for j in range(num_of_predictions):
         sub_matrices = np.zeros((len(predicted),len(predicted),2))
-        closest_interaction = np.zeros((len(predicted),len(predicted)))
         history = predicted
         predicted = trajPlan.evaluate(history)
+        predictions.append(predicted.transpose((1,0,2)))
         for x in range(len(predicted)):
-            cors, interaction_time = computeDistances(predicted,x, j) #adjancey matrix
+            cors = computeDistances(predicted,x) #adjancey matrix
             cors = np.array(cors)
             sub_matrices[x,:,:] = cors
-            closest_interaction[x,:] = interaction_time
         #print('sub matrices')
         #print(sub_matrices)
         matrices.append(sub_matrices)
-        times.append(closest_interaction)
     matrices = np.array(matrices)
-    times = np.array(times)
+    predictions = np.concatenate(predictions, 0)
+    delta = np.zeros((len(mask), len(mask), 2))
+    for i in range (len(mask)):
+        for j in range (len(mask)):
+            delta_t = int(mask[i, j])
+            if (delta_t > 0 and delta_t <= 40):
+                coord_i = predictions[delta_t - 1, i, :]
+                coord_j = predictions[delta_t - 1, j, :]
+                delta[i, j, :] = coord_i - coord_j
     
-    model_matrix, time = get_model_matrix(matrices, times)
+    model_matrix = get_model_matrix(matrices)
     #print(model_matrix)
-    mse_metric = np.sum(np.linalg.norm(model_matrix - ground_truth, axis = 2)*future_mask)
+    mse_metric = np.sum(np.linalg.norm(model_matrix - ground_truth, axis = 2)*future_mask) / np.sum(future_mask)
+    diff_norm = np.sum(np.linalg.norm(delta - ground_truth, axis = 2)*future_mask) / np.sum(future_mask)
     #print(mse_metric)
     #IF MASK is
     checkpoint['ground_truth'].append(ground_truth)
@@ -69,11 +78,12 @@ for batch in loader:
     checkpoint['future_mask'].append(future_mask)
     checkpoint['model_matrix'].append(model_matrix)
     checkpoint['mse_metric'].append(mse_metric)
-    checkpoint['interaction_time'].append(time)
+    checkpoint['delta'].append(delta)
+    checkpoint['predictions'].append(predictions)
     torch.save(checkpoint, checkpoint_path)
-    if (i % print_every == 0):
+    if (iter % print_every == 0):
         print(mse_metric)
-    i += 1
+    iter += 1
 
 
 

@@ -39,7 +39,7 @@ parser.add_argument('--skip', default=1, type=int)
 # Optimization
 parser.add_argument('--batch_size', default=8, type=int)
 parser.add_argument('--num_iterations', default=10000, type=int)
-parser.add_argument('--num_epochs', default=200, type=int)
+parser.add_argument('--num_epochs', default=100, type=int)
 
 # Model Options
 parser.add_argument('--embedding_dim', default=64, type=int)
@@ -83,7 +83,7 @@ parser.add_argument('--best_k', default=1, type=int)
 # Output
 parser.add_argument('--output_dir', default=os.getcwd())
 parser.add_argument('--print_every', default=5, type=int)
-parser.add_argument('--checkpoint_every', default=1000, type=int)
+parser.add_argument('--checkpoint_every', default=10000, type=int)
 parser.add_argument('--checkpoint_name', default='checkpoint')
 parser.add_argument('--checkpoint_start_from', default=None)
 parser.add_argument('--restore_from_checkpoint', default=1, type=int)
@@ -118,8 +118,8 @@ def main(args):
     long_dtype, float_dtype = get_dtypes(args)
 
     logger.info("Initializing train dataset")
-    train_path = [1, 2, 3, 4]
-    val_path = [0]
+    train_path = [0, 1, 2, 3]
+    val_path = [4]
     train_dset, train_loader = data_loader(args, train_path)
     logger.info("Initializing val dataset")
     _, val_loader = data_loader(args, val_path)
@@ -192,6 +192,8 @@ def main(args):
             'sample_ts': [],
             'restore_ts': [],
             'norm_g': [],
+            'mse_metric_val': [],
+            'mse_metric_train': [],
            
             'counters': {
                 't': None,
@@ -238,9 +240,9 @@ def main(args):
 
             # Maybe save loss
             if t % args.print_every == 0:
-                #logger.info('t = {} / {}'.format(t + 1, args.num_iterations))
+                logger.info('t = {} / {}'.format(t + 1, args.num_iterations))
                 
-                #logger.info('  [loss]: {:.3f}'.format(losses_g.item()))
+                logger.info('  [loss]: {:.3f}'.format(losses_g.item()))
                 checkpoint['G_losses'].append(losses_g.item())
                 checkpoint['losses_ts'].append(t)
 
@@ -252,25 +254,27 @@ def main(args):
 
                 # Check stats on the validation set
                 logger.info('Checking stats on val ...')
-                metrics_val = check_accuracy(
+                metrics_val, mse_metric_val = check_accuracy(
                     args, val_loader, generator)
                 logger.info('Checking stats on train ...')
-                metrics_train = check_accuracy(
+                metrics_train, mse_metric_train = check_accuracy(
                     args, train_loader, generator)
 
                 
                 logger.info('  [val] : {:.3f}'.format(metrics_val))
                 checkpoint['metrics_val'].append(metrics_val)
+                checkpoint['mse_metric_val'].append(mse_metric_val)
                
                 logger.info('  [train] : {:.3f}'.format(metrics_train))
                 checkpoint['metrics_train'].append(metrics_train)
+                checkpoint['mse_metric_train'].append(mse_metric_train)
 
                 # Save another checkpoint with model weights and
                 # optimizer state
                 checkpoint['g_state'] = generator.state_dict()
                 checkpoint['g_optim_state'] = optimizer_g.state_dict()
                 checkpoint_path = os.path.join(
-                    args.output_dir, 'checkpoints', '%s_with_model.pt' % args.checkpoint_name
+                    args.output_dir, 'checkpoints', '%s_with_model_%d.pt' % (args.checkpoint_name, t)
                 )
                 logger.info('Saving checkpoint to {}'.format(checkpoint_path))
                 torch.save(checkpoint, checkpoint_path)
@@ -323,10 +327,12 @@ def loss_func_2d(output, ground_truth, mask):
     loss = -(-torch.log(torch.clamp(loss_1, min=epsilon)) + 
              loss_2)
 
+    mse_metric = torch.sum(torch.linalg.norm(output[:, :, 0:2] - ground_truth, dim = 2)*mask) / torch.sum(mask)
+
     # make sure stds are positive
     #loss += (torch.abs(std_x) - std_x) ** 2 + (torch.abs(std_y) - std_y) ** 2
 
-    return torch.sum(loss * mask) / torch.sum(mask)
+    return torch.sum(loss * mask) / torch.sum(mask), mse_metric
 
 def generator_step(args, batch, generator, optimizer_g):
     t_weight = 0.5
@@ -351,7 +357,7 @@ def generator_step(args, batch, generator, optimizer_g):
             continue
         count += 1
 
-        output_loss = loss_func_2d(output, ground_truth, future_mask)
+        output_loss, norm = loss_func_2d(output, ground_truth, future_mask)
 
         time_loss = loss_func_1d(time, mask, future_mask)
 
@@ -379,6 +385,7 @@ def check_accuracy(args, loader, generator):
     generator.eval()
     total_loss = 0
     count = 0
+    mse_metric = 0.0
     with torch.no_grad():
         for batch in loader: 
             obs_traj, obs_traj_rel, ground_truth_list, mask_list, render_list, seq_start_end = batch
@@ -398,12 +405,13 @@ def check_accuracy(args, loader, generator):
                     continue
                 count += 1
 
-                output_loss = loss_func_2d(output, ground_truth, future_mask)
+                output_loss, norm = loss_func_2d(output, ground_truth, future_mask)
 
                 loss_output += output_loss
+                mse_metric += norm
             total_loss += loss_output.item()
     generator.train()
-    return total_loss / count
+    return total_loss / count, mse_metric / count
 
 
 if __name__ == '__main__':
